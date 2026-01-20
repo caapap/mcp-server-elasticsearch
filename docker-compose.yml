@@ -1,0 +1,24 @@
+services:
+  elasticsearch-mcp-server:
+    image: docker.kxdigit.com/stellar/es-mcp-server:latest
+    container_name: elasticsearch-mcp-server
+    ports:
+      - "30090:8080"
+    environment:
+      # Elasticsearch 连接配置
+      - ES_URL=http://172.30.137.172:9200
+      # 认证方式 1: API Key (推荐)
+      - ES_API_KEY=your_api_key_here
+      # 认证方式 2: Basic Auth (如果不用 API Key)
+      # - ES_USERNAME=elastic
+      # - ES_PASSWORD=your_password
+      # 可选: 跳过 SSL 验证 (仅开发环境)
+      # - ES_SSL_SKIP_VERIFY=true
+    restart: unless-stopped
+    command: ["http"]
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge
