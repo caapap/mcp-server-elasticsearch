@@ -1,6 +1,6 @@
 services:
   elasticsearch-mcp-server:
-    image: docker.kxdigit.com/stellar/es-mcp-server:latest
+    image: docker.kxdigit.com/stellar/elasticsearch-mcp-server:latest
     container_name: elasticsearch-mcp-server
     ports:
       - "30090:8080"
@@ -22,3 +22,7 @@ services:
 networks:
   mcp-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.27.0.0/16
+        - gateway: 172.27.0.1

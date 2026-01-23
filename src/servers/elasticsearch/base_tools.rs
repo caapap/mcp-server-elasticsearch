@@ -18,7 +18,7 @@
 use crate::servers::elasticsearch::{EsClientProvider, read_json};
 use elasticsearch::cat::{CatIndicesParts, CatShardsParts};
 use elasticsearch::cluster::ClusterHealthParts;
-use elasticsearch::indices::IndicesGetMappingParts;
+use elasticsearch::indices::{IndicesGetMappingParts, IndicesGetTemplateParts};
 use elasticsearch::{Elasticsearch, SearchParts};
 use indexmap::IndexMap;
 use rmcp::handler::server::tool::{Parameters, ToolRouter};
@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_aux::prelude::*;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
+use regex::Regex;
 
 #[derive(Clone)]
 pub struct EsBaseTools {
@@ -113,6 +114,14 @@ struct NodesInfoParams {
     node_id: Option<String>,
     /// Optional metrics to return (heap, cpu, load, etc.)
     metrics: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct GetTemplatesParams {
+    /// Optional template name filter (supports * wildcard)
+    name: Option<String>,
+    /// Optional index name to find which template(s) match it
+    matching_index: Option<String>,
 }
 
 #[tool_router]
@@ -468,6 +477,119 @@ impl EsBaseTools {
         
         Ok(CallToolResult::success(vec![Content::json(json!({ "nodes": nodes }))?]))
     }
+
+    //---------------------------------------------------------------------------------------------
+    /// Tool: Get index templates
+    ///
+    /// Comprehensive template query tool that supports:
+    /// - Filtering by template name (with wildcard support)
+    /// - Finding which template(s) match a specific index name
+    ///
+    /// # Arguments
+    /// * `name` - Optional template name filter (supports * wildcard)
+    /// * `matching_index` - Optional index name to find matching templates
+    ///
+    /// # Returns
+    /// Template definitions with matching logic applied
+    #[tool(
+        description = "Get index templates with optional filtering by name or matching index. Supports wildcard patterns and can determine which template applies to a specific index.",
+        annotations(title = "Get index templates", read_only_hint = true)
+    )]
+    async fn get_templates(
+        &self,
+        req_ctx: RequestContext<RoleServer>,
+        Parameters(params): Parameters<GetTemplatesParams>,
+    ) -> Result<CallToolResult, rmcp::Error> {
+        let es_client = self.es_client.get(req_ctx);
+        
+        // Determine the template name pattern to query
+        let template_name = params.name.as_deref().unwrap_or("*");
+        
+        // Get templates from Elasticsearch
+        let response = es_client
+            .indices()
+            .get_template(IndicesGetTemplateParts::Name(&[template_name]))
+            .send()
+            .await;
+        
+        let templates: HashMap<String, TemplateDefinition> = read_json(response).await?;
+        
+        // If matching_index is specified, filter and sort templates by matching logic
+        if let Some(index_name) = params.matching_index {
+            let matching_templates = self.find_matching_templates(&templates, &index_name);
+            
+            if matching_templates.is_empty() {
+                return Ok(CallToolResult::success(vec![
+                    Content::text(format!("No templates match index '{}'", index_name)),
+                    Content::json(json!({}))?
+                ]));
+            }
+            
+            // Return templates sorted by order (highest priority first)
+            let result: HashMap<String, &TemplateDefinition> = matching_templates
+                .into_iter()
+                .map(|(name, template)| (name.to_string(), template))
+                .collect();
+            
+            return Ok(CallToolResult::success(vec![
+                Content::text(format!(
+                    "Found {} template(s) matching index '{}' (sorted by priority):",
+                    result.len(),
+                    index_name
+                )),
+                Content::json(result)?
+            ]));
+        }
+        
+        // Return all templates (or filtered by name)
+        Ok(CallToolResult::success(vec![
+            Content::text(format!("Found {} template(s):", templates.len())),
+            Content::json(templates)?
+        ]))
+    }
+}
+
+impl EsBaseTools {
+    /// Find templates that match the given index name
+    /// Returns templates sorted by order (highest first)
+    fn find_matching_templates<'a>(
+        &self,
+        templates: &'a HashMap<String, TemplateDefinition>,
+        index_name: &str,
+    ) -> Vec<(&'a str, &'a TemplateDefinition)> {
+        let mut matching: Vec<(&str, &TemplateDefinition)> = templates
+            .iter()
+            .filter(|(_, template)| {
+                template.index_patterns.iter().any(|pattern| {
+                    self.matches_pattern(index_name, pattern)
+                })
+            })
+            .map(|(name, template)| (name.as_str(), template))
+            .collect();
+        
+        // Sort by order (descending - higher order = higher priority)
+        matching.sort_by(|a, b| {
+            let order_a = a.1.order.unwrap_or(0);
+            let order_b = b.1.order.unwrap_or(0);
+            order_b.cmp(&order_a)
+        });
+        
+        matching
+    }
+    
+    /// Check if an index name matches a pattern (supports * wildcard)
+    fn matches_pattern(&self, index_name: &str, pattern: &str) -> bool {
+        // Convert ES wildcard pattern to regex
+        // Escape special regex chars except *
+        let escaped = regex::escape(pattern).replace(r"\*", ".*");
+        let regex_pattern = format!("^{}$", escaped);
+        
+        if let Ok(re) = Regex::new(&regex_pattern) {
+            re.is_match(index_name)
+        } else {
+            false
+        }
+    }
 }
 
 #[tool_handler]
@@ -577,4 +699,31 @@ pub struct EsqlQueryResponse {
     pub is_partial: Option<bool>,
     pub columns: Vec<Column>,
     pub values: Vec<Vec<Value>>,
+}
+
+//----- Index Templates
+
+#[derive(Serialize, Deserialize)]
+pub struct TemplateDefinition {
+    /// Index patterns that this template applies to
+    pub index_patterns: Vec<String>,
+    
+    /// Template priority order (higher = higher priority)
+    pub order: Option<i32>,
+    
+    /// Index settings
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Value>,
+    
+    /// Index mappings
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mappings: Option<Value>,
+    
+    /// Index aliases
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aliases: Option<Value>,
+    
+    /// Template version
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i64>,
 }

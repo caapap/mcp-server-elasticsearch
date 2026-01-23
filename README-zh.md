@@ -17,10 +17,14 @@
 ## Available Tools (可用工具)
 
 * `list_indices`: 列出所有可用的 Elasticsearch 索引
+* `list_indices_detailed`: 列出索引的详细健康和大小信息
 * `get_mappings`: 获取指定索引的字段映射 (Field Mappings)
+* `get_templates`: 获取索引模板 (支持通配符过滤和索引匹配查询)
 * `search`: 执行 Elasticsearch 查询 (支持 Query DSL)
 * `esql`: 执行 ES|QL 查询
 * `get_shards`: 获取所有或指定索引的分片 (Shard) 信息
+* `get_cluster_health`: 获取集群健康状态
+* `get_nodes_info`: 获取集群节点详细信息
 
 ## Prerequisites (前置要求)
 
