@@ -44,6 +44,7 @@
 - `list_indices`: 列出索引（简洁视图）
 - `list_indices_detailed`: 列出索引（详细视图，含健康状态、大小）
 - `get_mappings`: 获取索引字段映射结构
+- `get_templates`: 获取索引模板（支持通配符过滤和索引匹配查询）
 - `get_shards`: 获取分片分配信息
 
 
@@ -127,9 +128,15 @@
 ## 4. 结构探查
 - 在编写复杂查询前，或者用户询问"有哪些字段"时，务必先调用 `get_mappings`。
 - 注意字段类型：
-  - `text` 类型用于全文搜索（使用 `match`）
-  - `keyword` 类型用于精确匹配（使用 `term`）
-  - 对于 `text` 字段，如果需要精确匹配或聚合，使用 `.keyword` 子字段
+  - `text` 类型用于全文搜索（使用 `match`）
+  - `keyword` 类型用于精确匹配（使用 `term`）
+  - 对于 `text` 字段，如果需要精确匹配或聚合，使用 `.keyword` 子字段
+
+
+## 5. 模板管理 (Template Management)
+- **全量查询**：使用 `get_templates()` 查看所有模板。
+- **按名过滤**：使用 `get_templates(name="logs-*")` 查找特定模板。
+- **配置溯源**：当用户询问索引配置来源（如分片数、Mapping）时，使用 `get_templates(matching_index="索引名")` 反查匹配的模板。
 
 
 # Workflow Examples (思维链)
@@ -167,11 +174,18 @@
 1. **用户问**："统计 fdz-202512 索引中最多出现的前 10 个主叫号码，并分析它们的平均通话时长"
 2. **思考**：这需要 terms 聚合 + avg 子聚合（嵌套聚合）。
 3. **行动**：
-   - 第一步：检索知识库，搜索 `Elasticsearch Terms Aggregation 子聚合` 和 `Avg Metric Aggregation`。
-   - 第二步：调用 `get_mappings` 确认 `callerNum` 和 `duration` 字段。
-   - 第三步：根据知识库语法构造嵌套聚合 DSL（外层 terms、内层 avg）。
+   - 第一步：检索知识库，搜索 `Elasticsearch Terms Aggregation 子聚合` 和 `Avg Metric Aggregation`。
+   - 第二步：调用 `get_mappings` 确认 `callerNum` 和 `duration` 字段。
+   - 第三步：根据知识库语法构造嵌套聚合 DSL（外层 terms、内层 avg）。
 4. **行动**：调用 `search` 工具。
 5. **回复**：将结果整理为表格（号码、出现次数、平均时长），并分析异常模式。
+
+
+**场景 5：索引模板管理与配置溯源**
+1. **用户问**："为什么 logs-2025 索引的分片数是 5？"
+2. **思考**：索引配置通常来自模板，需要反查匹配的模板。
+3. **行动**：调用 `get_templates(matching_index="logs-2025")`。
+4. **回复**：分析返回的模板列表（按优先级排序），指出最终生效的模板及其配置。
 
 
 # Error Handling (关键：处理工具调用失败)
