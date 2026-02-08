@@ -34,6 +34,46 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use regex::Regex;
 
+//------------------------------------------------------------------------------------------------
+// Safety limits (configurable via environment variables)
+
+/// Maximum characters for a single tool response
+fn max_response_chars() -> usize {
+    std::env::var("MCP_MAX_RESPONSE_CHARS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15_000)
+}
+
+/// Maximum search size hard cap
+fn max_search_size() -> u64 {
+    std::env::var("MCP_MAX_SEARCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200)
+}
+
+/// Maximum index list entries
+fn max_index_list() -> usize {
+    std::env::var("MCP_MAX_INDEX_LIST")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100)
+}
+
+/// Truncate a serialized JSON string if it exceeds max_chars, appending a hint
+fn maybe_truncate(json_str: String, max_chars: usize) -> Content {
+    if json_str.len() <= max_chars {
+        Content::text(json_str)
+    } else {
+        let end = json_str.floor_char_boundary(max_chars);
+        Content::text(format!(
+            "{}\n\n[已截断：响应超过 {} 字符（共 {} 字符），请缩小查询范围、添加过滤条件或指定 _source 字段]",
+            &json_str[..end], max_chars, json_str.len()
+        ))
+    }
+}
+
 #[derive(Clone)]
 pub struct EsBaseTools {
     es_client: EsClientProvider,
@@ -166,11 +206,24 @@ impl EsBaseTools {
             .send()
             .await;
 
-        let response: Vec<serde_json::Value> = read_json(response).await?;
+        let mut response: Vec<serde_json::Value> = read_json(response).await?;
 
+        let total_count = response.len();
+        let max_list = max_index_list();
+        let truncated = total_count > max_list;
+        if truncated {
+            response.truncate(max_list);
+        }
+        let summary = if truncated {
+            format!("Found {} indices (showing first {}, use index_pattern to filter):", total_count, max_list)
+        } else {
+            format!("Found {} indices:", total_count)
+        };
+        let json_str = serde_json::to_string(&response)
+            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![
-            Content::text(format!("Found {} indices:", response.len())),
-            Content::json(response)?,
+            Content::text(summary),
+            maybe_truncate(json_str, max_response_chars()),
         ]))
     }
 
@@ -223,7 +276,11 @@ impl EsBaseTools {
         let response: MappingResponse = read_json(response).await?;
 
         // use the first mapping (we can have many if the name is a wildcard)
-        let mapping = response.values().next().unwrap();
+        let mapping = response.values().next()
+            .ok_or_else(|| rmcp::Error::internal_error(
+                "No mapping found for the specified index. Please verify the index name exists.",
+                None,
+            ))?;
 
         Ok(CallToolResult::success(vec![
             Content::text(format!("Mappings for index {index}:")),
@@ -252,6 +309,16 @@ impl EsBaseTools {
         let es_client = self.es_client.get(req_ctx);
 
         let mut query_body = query_body;
+
+        // Enforce max size limit
+        let hard_max = max_search_size();
+        if let Some(Value::Number(n)) = query_body.get("size") {
+            if let Some(size) = n.as_u64() {
+                if size > hard_max {
+                    query_body.insert("size".to_string(), json!(hard_max));
+                }
+            }
+        }
 
         if let Some(fields) = fields {
             // Augment _source if it exists
@@ -293,14 +360,19 @@ impl EsBaseTools {
         // for hit in &response.hits.hits {
         //     results.push(Content::json(&hit.source)?);
         // }
+        let max_chars = max_response_chars();
         if !response.hits.hits.is_empty() {
             let sources = response.hits.hits.iter().map(|hit| &hit.source).collect::<Vec<_>>();
-            results.push(Content::json(&sources)?);
+            let json_str = serde_json::to_string(&sources)
+                .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+            results.push(maybe_truncate(json_str, max_chars));
         }
 
         if !response.aggregations.is_empty() {
             results.push(Content::text("Aggregations results:"));
-            results.push(Content::json(&response.aggregations)?);
+            let json_str = serde_json::to_string(&response.aggregations)
+                .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+            results.push(maybe_truncate(json_str, max_chars));
         }
 
         Ok(CallToolResult::success(results))

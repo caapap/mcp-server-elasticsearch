@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_aux::field_attributes::deserialize_bool_from_anything;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ElasticsearchMcpConfig {
@@ -207,6 +208,7 @@ impl ElasticsearchMcp {
             USER_AGENT,
             HeaderValue::from_str(&format!("elastic-mcp/{}", env!("CARGO_PKG_VERSION")))?,
         );
+        transport = transport.timeout(Duration::from_secs(30));
         let transport = transport.build()?;
         let es_client = Elasticsearch::new(transport);
 
