@@ -66,7 +66,11 @@ fn maybe_truncate(json_str: String, max_chars: usize) -> Content {
     if json_str.len() <= max_chars {
         Content::text(json_str)
     } else {
-        let end = json_str.floor_char_boundary(max_chars);
+        // Find a valid UTF-8 char boundary at or before max_chars
+        let mut end = max_chars.min(json_str.len());
+        while end > 0 && !json_str.is_char_boundary(end) {
+            end -= 1;
+        }
         Content::text(format!(
             "{}\n\n[已截断：响应超过 {} 字符（共 {} 字符），请缩小查询范围、添加过滤条件或指定 _source 字段]",
             &json_str[..end], max_chars, json_str.len()
