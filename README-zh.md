@@ -26,6 +26,19 @@
 * `get_cluster_health`: 获取集群健康状态
 * `get_nodes_info`: 获取集群节点详细信息
 
+## 安全限制与加固 (Safety Limits)
+
+为保护 ES 集群和 Agent 上下文，本服务对以下项做了硬性限制：
+
+| 限制项 | 默认值 | 环境变量 | 说明 |
+|--------|--------|----------|------|
+| 单次查询 `size` 上限 | 200 | `MCP_MAX_SEARCH_SIZE` | 单次 search 返回条数不超过此值。 |
+| 响应体截断 | 15,000 字符 | `MCP_MAX_RESPONSE_CHARS` | 工具返回超过此长度会截断并附加提示。 |
+| 索引列表上限 | 100 条 | `MCP_MAX_INDEX_LIST` | `list_indices_detailed` 最多返回此数量。 |
+| ES 请求超时 | 30 秒 | (编译时) | 所有发往 ES 的 HTTP 请求超时时间。 |
+
+空 mapping、不存在的索引等会返回明确错误而非导致服务崩溃。详细设计与推导见 [OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md)。
+
 ## Prerequisites (前置要求)
 
 * 一个运行中的 Elasticsearch 实例
@@ -103,6 +116,7 @@ docker run -i --rm -e ES_URL -e ES_API_KEY docker.elastic.co/mcp/elasticsearch s
 ### 方式 2: streamable-HTTP 协议 (推荐)
 
 > 注意: streamable-HTTP 是推荐协议，SSE 已被标记为弃用。
+> 可选环境变量：`MCP_MAX_RESPONSE_CHARS`、`MCP_MAX_SEARCH_SIZE`、`MCP_MAX_INDEX_LIST`（见上方「安全限制与加固」）。
 
 **启动命令**：
 ```bash
@@ -163,6 +177,12 @@ docker-compose logs -f elasticsearch-mcp-server
 ```bash
 docker-compose down
 ```
+
+### 测试说明 (Testing)
+
+* **单元测试**（`cargo test --test test_safety_limits`）：覆盖截断逻辑、size 限制、环境变量默认值，**无需连接 Elasticsearch**。
+* **集成/手动测试**（`tests/test_mcp_integration.py`、`tests/manual_test.sh`）：会**临时**创建索引（如 `test-safety-limits`）并写入 250–300 条测试文档，用于验证 search、size 上限和响应截断；**测试结束时会删除该索引**。请仅在**测试用** ES 集群上运行，不要在生产环境执行，以免在正式集群中产生临时索引与文档。
+
 **端点地址**：
 - MCP 端点: `http://<host>:30090/mcp`
 - 健康检查: `http://<host>:30090/ping`

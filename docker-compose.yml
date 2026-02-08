@@ -6,7 +6,7 @@ services:
       - "30090:8080"
     environment:
       # Elasticsearch 连接配置
-      - ES_URL=http://172.30.137.172:9200
+      - ES_URL=http://172.29.245.108:9200
       # 认证方式 1: API Key (推荐)
       - ES_API_KEY=your_api_key_here
       # 认证方式 2: Basic Auth (如果不用 API Key)
@@ -25,4 +25,4 @@ networks:
     ipam:
       config:
         - subnet: 172.27.0.0/16
-        - gateway: 172.27.0.1
+          gateway: 172.27.0.1

@@ -11,10 +11,27 @@ This server connects agents to your Elasticsearch data using the Model Context P
 ## Available Tools
 
 * `list_indices`: List all available Elasticsearch indices
+* `list_indices_detailed`: List indices with health and size information
 * `get_mappings`: Get field mappings for a specific Elasticsearch index
+* `get_templates`: Get index templates (with wildcard and matching-index support)
 * `search`: Perform an Elasticsearch search with the provided query DSL
 * `esql`: Perform an ES|QL query
 * `get_shards`: Get shard information for all or specific indices
+* `get_cluster_health`: Get cluster health status
+* `get_nodes_info`: Get cluster node details
+
+## Safety limits (hardening)
+
+This server enforces the following limits to protect the cluster and the agent context:
+
+| Limit | Default | Env override | Description |
+|-------|---------|--------------|-------------|
+| Search `size` cap | 200 | `MCP_MAX_SEARCH_SIZE` | Single search cannot return more than this many hits. |
+| Response truncation | 15,000 chars | `MCP_MAX_RESPONSE_CHARS` | Tool response longer than this is truncated with a hint. |
+| Index list cap | 100 | `MCP_MAX_INDEX_LIST` | `list_indices_detailed` returns at most this many indices. |
+| ES request timeout | 30s | (client build) | All Elasticsearch HTTP requests time out after 30 seconds. |
+
+Empty mapping responses and invalid index names return a clear error instead of crashing the server. See [OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md) for the full design and rationale.
 
 ## Prerequisites
 
@@ -107,6 +124,7 @@ The MCP server needs environment variables to be set:
   * Basic auth: `ES_USERNAME` and `ES_PASSWORD`
 * Optionally, `ES_SSL_SKIP_VERIFY` set to `true` skips SSL/TLS certificate verification when connecting
   to Elasticsearch. The ability to provide a custom certificate will be added in a later version.
+* Optional: `MCP_MAX_RESPONSE_CHARS`, `MCP_MAX_SEARCH_SIZE`, `MCP_MAX_INDEX_LIST` (see Safety limits above).
 
 The MCP server is started in http mode with this command:
 
@@ -127,6 +145,11 @@ Configuration for Claude Desktop (free edition that only supports the stdio prot
     ```bash
     uv tool install mcp-proxy
     ```
+
+### Testing
+
+* **Unit tests** (`cargo test --test test_safety_limits`): Cover truncation logic, size-limit enforcement, and env defaults. No Elasticsearch required.
+* **Integration tests** (`tests/test_mcp_integration.py`, `tests/manual_test.sh`): These scripts create a **temporary** index (e.g. `test-safety-limits`) and insert test documents (250–300 docs) to verify search, size limits, and response truncation. They **delete the index at the end**. Run them only against a **test** Elasticsearch instance, not production, to avoid creating and deleting indices in a live cluster.
 
 2. Add this configuration to Claude Desktop:
 
