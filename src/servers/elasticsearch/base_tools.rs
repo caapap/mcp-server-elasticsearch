@@ -63,20 +63,22 @@ fn max_index_list() -> usize {
         .unwrap_or(100)
 }
 
-/// Truncate a serialized JSON string if it exceeds max_chars, appending a hint
-fn maybe_truncate(json_str: String, max_chars: usize) -> Content {
+/// Truncate a serialized JSON string if it exceeds max_chars, appending a hint.
+/// Returns a String so callers can combine header + data into a single Content::text,
+/// which avoids multi-Content issues with some MCP clients (e.g. Dify).
+fn maybe_truncate(json_str: String, max_chars: usize) -> String {
     if json_str.len() <= max_chars {
-        Content::text(json_str)
+        json_str
     } else {
         // Find a valid UTF-8 char boundary at or before max_chars
         let mut end = max_chars.min(json_str.len());
         while end > 0 && !json_str.is_char_boundary(end) {
             end -= 1;
         }
-        Content::text(format!(
-            "{}\n\n[truncated: response too large, displaying first {} / total about {} characters. Please reduce time range, add filters, or reduce limit to get more precise results]",
+        format!(
+            "{}\n\n[truncated: showing first {} / total {} chars. Please narrow your query: reduce time range, add filters, specify _source fields, or use aggregations]",
             &json_str[..end], max_chars, json_str.len()
-        ))
+        )
     }
 }
 
@@ -227,10 +229,9 @@ impl EsBaseTools {
         };
         let json_str = serde_json::to_string(&response)
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![
-            Content::text(summary),
-            maybe_truncate(json_str, max_response_chars()),
-        ]))
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{}\n{}", summary, maybe_truncate(json_str, max_response_chars())
+        ))]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -257,10 +258,9 @@ impl EsBaseTools {
 
         let json_str = serde_json::to_string(&response)
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![
-            Content::text(format!("Found {} indices:", response.len())),
-            maybe_truncate(json_str, max_response_chars()),
-        ]))
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Found {} indices:\n{}", response.len(), maybe_truncate(json_str, max_response_chars())
+        ))]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -292,10 +292,9 @@ impl EsBaseTools {
 
         let json_str = serde_json::to_string(mapping)
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![
-            Content::text(format!("Mappings for index {index}:")),
-            maybe_truncate(json_str, max_response_chars()),
-        ]))
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Mappings for index {}:\n{}", index, maybe_truncate(json_str, max_response_chars())
+        ))]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -349,7 +348,9 @@ impl EsBaseTools {
 
         let response: SearchResult = read_json(response).await?;
 
-        let mut results: Vec<Content> = Vec::new();
+        // Build a single text response to avoid multi-Content issues with some MCP clients
+        let mut text_parts: Vec<String> = Vec::new();
+        let max_chars = max_response_chars();
 
         // Send result stats only if it's not pure aggregation results
         if response.aggregations.is_empty() || !response.hits.hits.is_empty() {
@@ -358,34 +359,23 @@ impl EsBaseTools {
                 .total
                 .map(|t| t.value.to_string())
                 .unwrap_or("unknown".to_string());
-
-            results.push(Content::text(format!(
-                "Total results: {}, showing {}.",
-                total,
-                response.hits.hits.len()
-            )));
+            text_parts.push(format!("Total results: {}, showing {}.", total, response.hits.hits.len()));
         }
 
-        // Original prototype sent a separate content for each document, it seems to confuse some LLMs
-        // for hit in &response.hits.hits {
-        //     results.push(Content::json(&hit.source)?);
-        // }
-        let max_chars = max_response_chars();
         if !response.hits.hits.is_empty() {
             let sources = response.hits.hits.iter().map(|hit| &hit.source).collect::<Vec<_>>();
             let json_str = serde_json::to_string(&sources)
                 .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-            results.push(maybe_truncate(json_str, max_chars));
+            text_parts.push(maybe_truncate(json_str, max_chars));
         }
 
         if !response.aggregations.is_empty() {
-            results.push(Content::text("Aggregations results:"));
             let json_str = serde_json::to_string(&response.aggregations)
                 .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-            results.push(maybe_truncate(json_str, max_chars));
+            text_parts.push(format!("Aggregations:\n{}", maybe_truncate(json_str, max_chars)));
         }
 
-        Ok(CallToolResult::success(results))
+        Ok(CallToolResult::success(vec![Content::text(text_parts.join("\n"))]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -418,10 +408,9 @@ impl EsBaseTools {
 
         let json_str = serde_json::to_string(&objects)
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![
-            Content::text("Results"),
-            maybe_truncate(json_str, max_response_chars()),
-        ]))
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Results:\n{}", maybe_truncate(json_str, max_response_chars())
+        ))]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -483,21 +472,20 @@ impl EsBaseTools {
             summary.sort_by(|a, b| b["total_shards"].as_u64().cmp(&a["total_shards"].as_u64()));
             let json_str = serde_json::to_string(&summary)
                 .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-            return Ok(CallToolResult::success(vec![
-                Content::text(format!(
-                    "Found {} shards across {} nodes (aggregated summary, too many shards for raw output). Use get_shards(index=\"specific-index\") for detailed shard info:",
-                    total, summary.len()
-                )),
-                maybe_truncate(json_str, max_response_chars()),
-            ]));
+            let header = format!(
+                "Found {} shards across {} nodes (aggregated summary). Use get_shards(index=\"specific-index\") for detailed shard info:",
+                total, summary.len()
+            );
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "{}\n{}", header, maybe_truncate(json_str, max_response_chars())
+            ))]));
         }
 
         let json_str = serde_json::to_string(&response)
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![
-            Content::text(format!("Found {} shards:", total)),
-            maybe_truncate(json_str, max_response_chars()),
-        ]))
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Found {} shards:\n{}", total, maybe_truncate(json_str, max_response_chars())
+        ))]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -545,7 +533,7 @@ impl EsBaseTools {
         
         let json_str = serde_json::to_string(&health)
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![maybe_truncate(json_str, max_response_chars())]))
+        Ok(CallToolResult::success(vec![Content::text(maybe_truncate(json_str, max_response_chars()))]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -602,7 +590,7 @@ impl EsBaseTools {
         
         let json_str = serde_json::to_string(&json!({ "nodes": nodes }))
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![maybe_truncate(json_str, max_response_chars())]))
+        Ok(CallToolResult::success(vec![Content::text(maybe_truncate(json_str, max_response_chars()))]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -648,7 +636,6 @@ impl EsBaseTools {
             if matching_templates.is_empty() {
                 return Ok(CallToolResult::success(vec![
                     Content::text(format!("No templates match index '{}'", index_name)),
-                    Content::json(json!({}))?
                 ]));
             }
             
@@ -660,23 +647,21 @@ impl EsBaseTools {
             
             let json_str = serde_json::to_string(&result)
                 .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-            return Ok(CallToolResult::success(vec![
-                Content::text(format!(
-                    "Found {} template(s) matching index '{}' (sorted by priority):",
-                    result.len(),
-                    index_name
-                )),
-                maybe_truncate(json_str, max_response_chars()),
-            ]));
+            let header = format!(
+                "Found {} template(s) matching index '{}' (sorted by priority):",
+                result.len(), index_name
+            );
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "{}\n{}", header, maybe_truncate(json_str, max_response_chars())
+            ))]));
         }
         
         // Return all templates (or filtered by name)
         let json_str = serde_json::to_string(&templates)
             .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![
-            Content::text(format!("Found {} template(s):", templates.len())),
-            maybe_truncate(json_str, max_response_chars()),
-        ]))
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Found {} template(s):\n{}", templates.len(), maybe_truncate(json_str, max_response_chars())
+        ))]))
     }
 }
 
