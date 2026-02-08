@@ -72,7 +72,7 @@ fn maybe_truncate(json_str: String, max_chars: usize) -> Content {
             end -= 1;
         }
         Content::text(format!(
-            "{}\n\n[已截断：响应超过 {} 字符（共 {} 字符），请缩小查询范围、添加过滤条件或指定 _source 字段]",
+            "{}\n\n[truncated: response too large, displaying first {} / total about {} characters. Please reduce time range, add filters, or reduce limit to get more precise results]",
             &json_str[..end], max_chars, json_str.len()
         ))
     }
@@ -745,7 +745,11 @@ pub struct Mappings {
 pub struct Mapping {
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<JsonObject>,
-    properties: HashMap<String, MappingProperty>,
+    #[serde(default)]
+    pub properties: HashMap<String, MappingProperty>,
+    // Allow unknown fields from ES
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize)]
