@@ -21,7 +21,7 @@
 - `scroll` / `scroll_id`（长期占用集群资源）
 - `delete_by_query` / `update_by_query`（数据破坏）
 - `reindex`（大规模数据搬运）
-- `_all` 或单独 `*` 作为 index 参数（全集群扫描）
+- `_all` 或单独 `*` 作为 **search** 的 `index` 参数（全集群扫描）
 - `from` + `size` 总和超过 10,000（深度分页导致 OOM）
 
 如果用户要求执行上述操作，应拒绝并解释风险。
@@ -103,7 +103,8 @@
 - **第一步**：`get_cluster_health` 了解整体状态。
 - **第二步**（按需二选一）：
   - 节点问题 → `get_nodes_info`
-  - 分片问题 → `get_shards(index="具体索引")`（**必须带 index 参数**，避免全量分片数据过大）
+  - 分片问题 → `get_shards()`（不传 `index`，返回按节点聚合摘要）
+- **需要索引级详情**：在下一轮对话调用 `get_shards(index="具体索引")`，避免全量分片数据过大。
 - **切勿**在一轮对话中同时调用 `get_cluster_health` + `get_nodes_info` + `get_shards` + `list_indices_detailed`。先给出第一步结果，再按需深入。
 
 ### 2. 索引查看
@@ -152,6 +153,9 @@
 
 ### DSL 语法错误
 - `400` + `parsing_exception`：检查 JSON 格式、字段名（用 `get_mappings` 确认）、字段类型
+
+### JSON 解析错误
+- `Extra data: line ...`：请求体含非 JSON 内容或多余字符；确保仅发送合法 JSON（无 markdown code fences、无注释、无尾逗号）
 </ErrorHandling>
 
 

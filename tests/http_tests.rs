@@ -154,11 +154,22 @@ async fn end_to_end() -> anyhow::Result<()> {
 
     let response_body: serde_json::Value = parse_response(response).await?;
 
-    assert_eq!(response_body["result"]["content"][0]["text"], "Found 1 indices:");
-    assert_eq!(
-        response_body["result"]["content"][1]["text"],
-        "[{\"index\":\"test-index\",\"status\":\"open\",\"docs.count\":100}]"
-    );
+    let content = &response_body["result"]["content"][0];
+    let payload = if content.get("json").is_some() {
+        content["json"].clone()
+    } else if content.get("text").map(|v| v.is_string()).unwrap_or(false) {
+        serde_json::from_str(content["text"].as_str().unwrap())?
+    } else {
+        bail!("Unexpected content format: {:?}", content);
+    };
+    assert_eq!(payload["message"], "Found 1 indices.");
+    assert_eq!(payload["data"][0]["index"], "test-index");
+    assert_eq!(payload["data"][0]["status"], "open");
+    let doc_count = payload["data"][0]["doc_count"]
+        .as_u64()
+        .or_else(|| payload["data"][0]["docs.count"].as_u64())
+        .unwrap_or(0);
+    assert_eq!(doc_count, 100);
 
     Ok(())
 }

@@ -64,8 +64,7 @@ fn max_index_list() -> usize {
 }
 
 /// Truncate a serialized JSON string if it exceeds max_chars, appending a hint.
-/// Returns a String so callers can combine header + data into a single Content::text,
-/// which avoids multi-Content issues with some MCP clients (e.g. Dify).
+/// Returns a String for embedding in a JSON response (e.g. { data: { truncated, preview } }).
 fn maybe_truncate(json_str: String, max_chars: usize) -> String {
     if json_str.len() <= max_chars {
         json_str
@@ -79,6 +78,19 @@ fn maybe_truncate(json_str: String, max_chars: usize) -> String {
             "{} [truncated: showing first {} / total {} chars. Please narrow your query.]",
             &json_str[..end], max_chars, json_str.len()
         )
+    }
+}
+
+fn pack_json_value<T: Serialize>(data: &T, max_chars: usize) -> Result<Value, rmcp::Error> {
+    let json_str = serde_json::to_string(data)
+        .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+    if json_str.len() <= max_chars {
+        serde_json::to_value(data).map_err(|e| rmcp::Error::internal_error(e.to_string(), None))
+    } else {
+        Ok(json!({
+            "truncated": true,
+            "preview": maybe_truncate(json_str, max_chars)
+        }))
     }
 }
 
@@ -223,15 +235,14 @@ impl EsBaseTools {
             response.truncate(max_list);
         }
         let summary = if truncated {
-            format!("Found {} indices (showing first {}, use index_pattern to filter):", total_count, max_list)
+            format!("Found {} indices (showing first {}, use index_pattern to filter).", total_count, max_list)
         } else {
-            format!("Found {} indices:", total_count)
+            format!("Found {} indices.", total_count)
         };
-        let json_str = serde_json::to_string(&response)
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{} {}", summary, maybe_truncate(json_str, max_response_chars())
-        ))]))
+        let data = pack_json_value(&response, max_response_chars())?;
+        Ok(CallToolResult::success(vec![
+            Content::json(json!({ "message": summary, "data": data }))?
+        ]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -256,11 +267,10 @@ impl EsBaseTools {
 
         let response: Vec<CatIndexResponse> = read_json(response).await?;
 
-        let json_str = serde_json::to_string(&response)
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Found {} indices: {}", response.len(), maybe_truncate(json_str, max_response_chars())
-        ))]))
+        let data = pack_json_value(&response, max_response_chars())?;
+        Ok(CallToolResult::success(vec![
+            Content::json(json!({ "message": format!("Found {} indices.", response.len()), "data": data }))?
+        ]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -290,11 +300,10 @@ impl EsBaseTools {
                 None,
             ))?;
 
-        let json_str = serde_json::to_string(mapping)
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Mappings for index {}: {}", index, maybe_truncate(json_str, max_response_chars())
-        ))]))
+        let data = pack_json_value(mapping, max_response_chars())?;
+        Ok(CallToolResult::success(vec![
+            Content::json(json!({ "message": format!("Mappings for index {}.", index), "data": data }))?
+        ]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -348,34 +357,33 @@ impl EsBaseTools {
 
         let response: SearchResult = read_json(response).await?;
 
-        // Build a single text response to avoid multi-Content issues with some MCP clients
-        let mut text_parts: Vec<String> = Vec::new();
         let max_chars = max_response_chars();
+        let mut payload = Map::new();
 
-        // Send result stats only if it's not pure aggregation results
         if response.aggregations.is_empty() || !response.hits.hits.is_empty() {
             let total = response
                 .hits
                 .total
                 .map(|t| t.value.to_string())
                 .unwrap_or("unknown".to_string());
-            text_parts.push(format!("Total results: {}, showing {}.", total, response.hits.hits.len()));
+            payload.insert(
+                "message".to_string(),
+                Value::String(format!("Total results: {}, showing {}.", total, response.hits.hits.len())),
+            );
         }
 
         if !response.hits.hits.is_empty() {
             let sources = response.hits.hits.iter().map(|hit| &hit.source).collect::<Vec<_>>();
-            let json_str = serde_json::to_string(&sources)
-                .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-            text_parts.push(maybe_truncate(json_str, max_chars));
+            let data = pack_json_value(&sources, max_chars)?;
+            payload.insert("hits".to_string(), data);
         }
 
         if !response.aggregations.is_empty() {
-            let json_str = serde_json::to_string(&response.aggregations)
-                .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-            text_parts.push(format!("Aggregations: {}", maybe_truncate(json_str, max_chars)));
+            let data = pack_json_value(&response.aggregations, max_chars)?;
+            payload.insert("aggregations".to_string(), data);
         }
 
-        Ok(CallToolResult::success(vec![Content::text(text_parts.join(" "))]))
+        Ok(CallToolResult::success(vec![Content::json(Value::Object(payload))?]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -406,11 +414,10 @@ impl EsBaseTools {
             objects.push(Value::Object(obj));
         }
 
-        let json_str = serde_json::to_string(&objects)
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Results: {}", maybe_truncate(json_str, max_response_chars())
-        ))]))
+        let data = pack_json_value(&objects, max_response_chars())?;
+        Ok(CallToolResult::success(vec![
+            Content::json(json!({ "message": "Results.", "data": data }))?
+        ]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -470,22 +477,20 @@ impl EsBaseTools {
                 }))
                 .collect();
             summary.sort_by(|a, b| b["total_shards"].as_u64().cmp(&a["total_shards"].as_u64()));
-            let json_str = serde_json::to_string(&summary)
-                .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-            let header = format!(
-                "Found {} shards across {} nodes (aggregated summary). Use get_shards(index=\"specific-index\") for detailed shard info:",
+            let data = pack_json_value(&summary, max_response_chars())?;
+            let message = format!(
+                "Found {} shards across {} nodes (aggregated summary). Use get_shards(index=\"specific-index\") for detailed shard info.",
                 total, summary.len()
             );
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "{} {}", header, maybe_truncate(json_str, max_response_chars())
-            ))]));
+            return Ok(CallToolResult::success(vec![
+                Content::json(json!({ "message": message, "data": data }))?
+            ]));
         }
 
-        let json_str = serde_json::to_string(&response)
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Found {} shards: {}", total, maybe_truncate(json_str, max_response_chars())
-        ))]))
+        let data = pack_json_value(&response, max_response_chars())?;
+        Ok(CallToolResult::success(vec![
+            Content::json(json!({ "message": format!("Found {} shards.", total), "data": data }))?
+        ]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -531,9 +536,10 @@ impl EsBaseTools {
         // The plan suggests a specific return format.
         let health: serde_json::Value = read_json(response).await?;
         
-        let json_str = serde_json::to_string(&health)
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(maybe_truncate(json_str, max_response_chars()))]))
+        let data = pack_json_value(&health, max_response_chars())?;
+        Ok(CallToolResult::success(vec![
+            Content::json(json!({ "message": "Cluster health.", "data": data }))?
+        ]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -588,9 +594,10 @@ impl EsBaseTools {
         // Given this is a new tool replacing Ansible, a list is fine and easier to process usually.
         // However, to be helpful, let's wrap it.
         
-        let json_str = serde_json::to_string(&json!({ "nodes": nodes }))
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(maybe_truncate(json_str, max_response_chars()))]))
+        let data = pack_json_value(&json!({ "nodes": nodes }), max_response_chars())?;
+        Ok(CallToolResult::success(vec![
+            Content::json(json!({ "message": "Nodes info.", "data": data }))?
+        ]))
     }
 
     //---------------------------------------------------------------------------------------------
@@ -635,7 +642,7 @@ impl EsBaseTools {
             
             if matching_templates.is_empty() {
                 return Ok(CallToolResult::success(vec![
-                    Content::text(format!("No templates match index '{}'", index_name)),
+                    Content::json(json!({ "message": format!("No templates match index '{}'.", index_name), "data": {} }))?
                 ]));
             }
             
@@ -645,23 +652,21 @@ impl EsBaseTools {
                 .map(|(name, template)| (name.to_string(), template))
                 .collect();
             
-            let json_str = serde_json::to_string(&result)
-                .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-            let header = format!(
-                "Found {} template(s) matching index '{}' (sorted by priority):",
+            let data = pack_json_value(&result, max_response_chars())?;
+            let message = format!(
+                "Found {} template(s) matching index '{}' (sorted by priority).",
                 result.len(), index_name
             );
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "{} {}", header, maybe_truncate(json_str, max_response_chars())
-            ))]));
+            return Ok(CallToolResult::success(vec![
+                Content::json(json!({ "message": message, "data": data }))?
+            ]));
         }
         
         // Return all templates (or filtered by name)
-        let json_str = serde_json::to_string(&templates)
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Found {} template(s): {}", templates.len(), maybe_truncate(json_str, max_response_chars())
-        ))]))
+        let data = pack_json_value(&templates, max_response_chars())?;
+        Ok(CallToolResult::success(vec![
+            Content::json(json!({ "message": format!("Found {} template(s).", templates.len()), "data": data }))?
+        ]))
     }
 }
 
